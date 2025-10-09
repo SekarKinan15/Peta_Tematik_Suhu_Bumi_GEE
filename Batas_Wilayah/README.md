@@ -1,1 +1,1 @@
-
+Folder ini berisikan file shp berekstensi .zip dari batas-batas wilayah kota/provinsi di Indonesia untuk memberikan garis-garis batas wilayah pada pembuatan peta tematik suhu bumi di Google Earth Engine
