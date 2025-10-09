@@ -1,0 +1,77 @@
+// === 1. Load dataset MODIS LST ===
+var modisLST = ee.ImageCollection("MODIS/061/MOD11A2")
+                .filterDate('2025-06-01', '2025-06-30') // variasikan rentang tanggal pengambilan data
+                .select(['LST_Day_1km', 'Emis_31']);
+
+// === 2. Proses data suhu & emisivitas ===
+var lstProcessed = modisLST.mean();
+var lstKelvin = lstProcessed.select('LST_Day_1km').multiply(0.02);
+var emissivity = lstProcessed.select('Emis_31').multiply(0.002);
+var lstCelsius = lstKelvin.subtract(273.15).rename('LST_C');
+var processedImage = lstCelsius.addBands(emissivity.rename('Emissivity'));
+
+// === 3. Load shapefile wilayah ===
+var wilayah = ee.FeatureCollection("projects/lst-mapping-jawa-barat/assets/Kota_Bandung"); // (Ganti path sesuai asset batas-batas wilayah)
+
+// === 4. Potong data berdasarkan wilayah ===
+var clippedData = processedImage.clip(wilayah);
+var mask = ee.Image().byte().paint(wilayah, 1);
+var maskedData = clippedData.updateMask(mask);
+
+// === 5. Visualisasi peta tematik suhu ===
+Map.centerObject(wilayah, 10);
+
+Map.addLayer(wilayah.style({
+  color: 'black',
+  fillColor: '00000000',
+  width: 1
+}), {}, 'Batas Wilayah');
+
+var suhuVis = {
+  min: 10,
+  max: 40,
+  palette: ['blue', 'green', 'yellow', 'red'],
+  opacity: 0.8
+};
+
+Map.addLayer(maskedData.select('LST_C'), suhuVis, 'Peta Suhu (°C)');
+
+// === 6. Tambahkan legend suhu ===
+function makeLegendRow(color, label) {
+  var colorBox = ui.Label({
+    style: {backgroundColor: color, padding: '8px', margin: '4px', width: '20px'}
+  });
+  var description = ui.Label({value: label, style: {margin: '4px'}});
+  return ui.Panel({widgets: [colorBox, description], layout: ui.Panel.Layout.Flow('horizontal')});
+}
+
+var legend = ui.Panel({
+  style: {position: 'bottom-right', padding: '8px', backgroundColor: 'white'}
+});
+legend.add(ui.Label({
+  value: 'Legenda Suhu Permukaan (°C)',
+  style: {fontWeight: 'bold', fontSize: '14px', margin: '4px 0'}
+}));
+
+var suhuPalette = ['blue', 'green', 'yellow', 'red'];
+var suhuLabels = ['≤ 15 °C', '16 – 25 °C', '26 – 35 °C', '≥ 36 °C'];
+
+for (var i = 0; i < suhuPalette.length; i++) {
+  legend.add(makeLegendRow(suhuPalette[i], suhuLabels[i]));
+}
+Map.add(legend);
+
+// === 7. Hitung suhu & emisivitas rata-rata per Wilayah ===
+var hasil = maskedData.reduceRegions({
+  collection: wilayah,
+  reducer: ee.Reducer.mean(),
+  scale: 1000
+});
+
+// === 8. Simpan hasil ke CSV ===
+Export.table.toDrive({
+  collection: hasil,
+  description: 'LST_Emissivity_',
+  folder: 'EarthEngineExports',
+  fileFormat: 'CSV'
+});
