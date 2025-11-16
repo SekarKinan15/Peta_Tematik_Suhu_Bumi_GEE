@@ -86,7 +86,8 @@ var hasil = maskedData.reduceRegions({
 // === 9. Ekspor CSV ===
 Export.table.toDrive({
   collection: hasil,
-  description: 'LST_Emis_BBE_KotaBandung',
+  description: 'LST_Emissivity_CSV',
   folder: 'EarthEngineExports',
   fileFormat: 'CSV'
 });
+
