@@ -1,24 +1,39 @@
 // === 1. Load dataset MODIS LST ===
 var modisLST = ee.ImageCollection("MODIS/061/MOD11A2")
-                .filterDate('2025-06-01', '2025-06-30') // variasikan rentang tanggal pengambilan data
-                .select(['LST_Day_1km', 'Emis_31']);
+                .filterDate('2025-06-01', '2025-06-30')
+                .select(['LST_Day_1km', 'Emis_31', 'Emis_32']);
 
 // === 2. Proses data suhu & emisivitas ===
 var lstProcessed = modisLST.mean();
+
+// Skala sesuai dokumentasi MODIS
 var lstKelvin = lstProcessed.select('LST_Day_1km').multiply(0.02);
-var emissivity = lstProcessed.select('Emis_31').multiply(0.002);
 var lstCelsius = lstKelvin.subtract(273.15).rename('LST_C');
-var processedImage = lstCelsius.addBands(emissivity.rename('Emissivity'));
 
-// === 3. Load shapefile wilayah ===
-var wilayah = ee.FeatureCollection("projects/lst-mapping-jawa-barat/assets/Kota_Bandung"); // (Ganti path sesuai asset batas-batas wilayah)
+var emis31 = lstProcessed.select('Emis_31').multiply(0.002).rename('Emis_31');
+var emis32 = lstProcessed.select('Emis_32').multiply(0.002).rename('Emis_32');
 
-// === 4. Potong data berdasarkan wilayah ===
-var clippedData = processedImage.clip(wilayah);
+// === 3. Hitung Broadband Emissivity (BBE) ===
+// Rumus perhitungan Emisivitas Broadband
+var bbe = emis31.multiply(0.273)
+                .add(emis32.multiply(0.706))
+                .subtract(0.013)
+                .rename('BBE');
+
+// Gabungkan semua band ke satu citra
+var processedImage = lstCelsius.addBands([emis31, emis32, bbe]);
+
+// === 4. Load shapefile wilayah ===
+var wilayah = ee.FeatureCollection("projects/lst-mapping-jawa-barat/assets/Kota_Bandung");
+
+// === 5. Potong data ===
+var clipped = processedImage.clip(wilayah);
+
+// Mask untuk hanya menampilkan area wilayah
 var mask = ee.Image().byte().paint(wilayah, 1);
-var maskedData = clippedData.updateMask(mask);
+var maskedData = clipped.updateMask(mask);
 
-// === 5. Visualisasi peta tematik suhu ===
+// === 6. Visualisasi peta LST ===
 Map.centerObject(wilayah, 10);
 
 Map.addLayer(wilayah.style({
@@ -36,7 +51,7 @@ var suhuVis = {
 
 Map.addLayer(maskedData.select('LST_C'), suhuVis, 'Peta Suhu (°C)');
 
-// === 6. Tambahkan legend suhu ===
+// === 7. Legend suhu ===
 function makeLegendRow(color, label) {
   var colorBox = ui.Label({
     style: {backgroundColor: color, padding: '8px', margin: '4px', width: '20px'}
@@ -61,17 +76,17 @@ for (var i = 0; i < suhuPalette.length; i++) {
 }
 Map.add(legend);
 
-// === 7. Hitung suhu & emisivitas rata-rata per Wilayah ===
+// === 8. Ekspor nilai rata-rata per wilayah ===
 var hasil = maskedData.reduceRegions({
   collection: wilayah,
   reducer: ee.Reducer.mean(),
   scale: 1000
 });
 
-// === 8. Simpan hasil ke CSV ===
+// === 9. Ekspor CSV ===
 Export.table.toDrive({
   collection: hasil,
-  description: 'LST_Emissivity_',
+  description: 'LST_Emis_BBE_KotaBandung',
   folder: 'EarthEngineExports',
   fileFormat: 'CSV'
 });
