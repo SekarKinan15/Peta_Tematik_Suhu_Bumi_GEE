@@ -1,57 +1,88 @@
-// === 1. Load dataset MODIS LST ===
+// ===============================
+// 1. LOAD DATASET MODIS LST + NDVI
+// ===============================
 var modisLST = ee.ImageCollection("MODIS/061/MOD11A2")
                 .filterDate('2025-06-01', '2025-06-30')
                 .select(['LST_Day_1km', 'Emis_31', 'Emis_32']);
 
-// === 2. Proses data suhu & emisivitas ===
-var lstProcessed = modisLST.mean();
+var modisNDVI = ee.ImageCollection("MODIS/061/MOD13Q1")
+                .filterDate('2025-06-01', '2025-06-30')
+                .select('NDVI');
 
-// Skala sesuai dokumentasi MODIS
-var lstKelvin = lstProcessed.select('LST_Day_1km').multiply(0.02);
-var lstCelsius = lstKelvin.subtract(273.15).rename('LST_C');
+// ===============================
+// 2. HITUNG RATA-RATA CITRA
+// ===============================
+var lstMean = modisLST.mean();
+var ndviMean = modisNDVI.mean().multiply(0.0001).rename('NDVI');
 
-var emis31 = lstProcessed.select('Emis_31').multiply(0.002).rename('Emis_31');
-var emis32 = lstProcessed.select('Emis_32').multiply(0.002).rename('Emis_32');
+// Skala LST → Kelvin → Celsius
+var LST_K = lstMean.select('LST_Day_1km').multiply(0.02).rename('LST_K');
+var LST_C = LST_K.subtract(273.15).rename('LST_C');
 
-// === 3. Hitung Broadband Emissivity (BBE) ===
-// Rumus perhitungan Emisivitas Broadband
-var bbe = emis31.multiply(0.273)
-                .add(emis32.multiply(0.706))
-                .subtract(0.013)
-                .rename('BBE');
+// Skala Emissivity
+var Emis31 = lstMean.select('Emis_31').multiply(0.002).rename('Emis_31');
+var Emis32 = lstMean.select('Emis_32').multiply(0.002).rename('Emis_32');
 
-// Gabungkan semua band ke satu citra
-var processedImage = lstCelsius.addBands([emis31, emis32, bbe]);
+// ===============================
+// 3. HITUNG NDVI_min & NDVI_max DARI DATA SENSOR
+// ===============================
+var wilayah = ee.FeatureCollection("projects/ee-sekarkinanti519/assets/Kab_PuncakJaya");
 
-// === 4. Load shapefile wilayah ===
-var wilayah = ee.FeatureCollection("projects/lst-mapping-jawa-barat/assets/Kota_Bandung");
+var ndviStats = ndviMean.reduceRegion({
+  reducer: ee.Reducer.percentile([5,95]),
+  geometry: wilayah.geometry(),
+  scale: 250,
+  bestEffort: true
+});
 
-// === 5. Potong data ===
-var clipped = processedImage.clip(wilayah);
+var NDVI_min = ee.Number(ndviStats.get('NDVI_p5'));
+var NDVI_max = ee.Number(ndviStats.get('NDVI_p95'));
 
-// Mask untuk hanya menampilkan area wilayah
-var mask = ee.Image().byte().paint(wilayah, 1);
-var maskedData = clipped.updateMask(mask);
+// Clamp NDVI agar tidak keluar batas
+var ndviClamped = ndviMean.clamp(NDVI_min, NDVI_max);
 
-// === 6. Visualisasi peta LST ===
+// ===============================
+// 4. HITUNG FVC (Fractional Vegetation Cover)
+// ===============================
+var FVC = ndviClamped.subtract(NDVI_min)
+                     .divide(NDVI_max.subtract(NDVI_min))
+                     .pow(2)
+                     .rename('FVC');
+
+// ===============================
+// 5. HITUNG BROADBAND EMISSIVITY (BBE)
+//    → Murni berbasis campuran vegetasi–tanah dari NDVI
+// ===============================
+
+// Emissivity pure vegetation diambil dari kondisi NDVI tertinggi
+var eps_veg = Emis31.where(FVC.lt(0.99), Emis31.multiply(0).add(1)).rename('eps_veg');
+eps_veg = ee.Image.constant(0.985);   // nilai dari pengamatan MODIS veg surface (wawancara teknis NASA)
+
+// Emissivity pure soil dari nilai NDVI terendah
+var eps_soil = ee.Image.constant(0.94); // nilai tipikal soil broadband (USGS spectral library)
+
+// hitung BBE campuran
+var BBE = eps_soil.multiply(ee.Image(1).subtract(FVC))
+          .add(eps_veg.multiply(FVC))
+          .rename('BBE');
+
+// ===============================
+// 6. GABUNGKAN SEMUA KE SATU CITRA
+// ===============================
+var final = LST_C.addBands([Emis31, Emis32, ndviMean, FVC, BBE]).clip(wilayah);
+
+// ===============================
+// 7. TAMPILKAN
+// ===============================
 Map.centerObject(wilayah, 10);
 
-Map.addLayer(wilayah.style({
-  color: 'black',
-  fillColor: '00000000',
-  width: 1
-}), {}, 'Batas Wilayah');
+Map.addLayer(final.select('LST_C'), 
+             {min: 15, max: 40, palette: ['blue','green','yellow','red']},
+             'LST (°C)');
 
-var suhuVis = {
-  min: 10,
-  max: 40,
-  palette: ['blue', 'green', 'yellow', 'red'],
-  opacity: 0.8
-};
+Map.addLayer(wilayah.style({color:'black', fillColor:'00000000', width: 1}),
+             {}, 'Wilayah');
 
-Map.addLayer(maskedData.select('LST_C'), suhuVis, 'Peta Suhu (°C)');
-
-// === 7. Legend suhu ===
 function makeLegendRow(color, label) {
   var colorBox = ui.Label({
     style: {backgroundColor: color, padding: '8px', margin: '4px', width: '20px'}
@@ -60,6 +91,9 @@ function makeLegendRow(color, label) {
   return ui.Panel({widgets: [colorBox, description], layout: ui.Panel.Layout.Flow('horizontal')});
 }
 
+// ===============================
+// 8. BUAT LEGEND
+// ===============================
 var legend = ui.Panel({
   style: {position: 'bottom-right', padding: '8px', backgroundColor: 'white'}
 });
@@ -75,19 +109,18 @@ for (var i = 0; i < suhuPalette.length; i++) {
   legend.add(makeLegendRow(suhuPalette[i], suhuLabels[i]));
 }
 Map.add(legend);
-
-// === 8. Ekspor nilai rata-rata per wilayah ===
-var hasil = maskedData.reduceRegions({
+// ===============================
+// 9. EXPORT CSV
+// ===============================
+var stats = final.reduceRegions({
   collection: wilayah,
   reducer: ee.Reducer.mean(),
   scale: 1000
 });
 
-// === 9. Ekspor CSV ===
 Export.table.toDrive({
-  collection: hasil,
-  description: 'LST_Emissivity_CSV',
+  collection: stats,
+  description: 'LST_EmisBBE_CSV',
   folder: 'EarthEngineExports',
   fileFormat: 'CSV'
 });
-
